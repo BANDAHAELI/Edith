@@ -1,113 +1,115 @@
-const { File } = require('megajs');
-const AdmZip = require('adm-zip');
-const fetch = require('node-fetch');
-const path = require('path');
-const Module = require('module');
+const { File } = require("megajs");
+const AdmZip = require("adm-zip");
+const Module = require("module");
+const path = require("path");
+const fetch = require("node-fetch");
 
-// GitHub JSON containing MEGA.nz link
+// ----------- CONFIG -----------
 const githubJsonUrl = 'https://raw.githubusercontent.com/londybaz420/MEGA/main/mega.json';
+async function getMegaLink() {
+  try {
+    const response = await fetch(githubJsonUrl);
+    const data = await response.json();
+    return data.megaUrl;
+  } catch (error) {
+    console.error('❌ Error fetching MEGA link:', error);
+    process.exit(1);
+  }
+}
+const entryFile = "EDITH-MD/index.js"; // <- Bot ka entry point
+// ------------------------------
 
-// Virtual in-memory filesystem
-const virtualFS = {};
-let entryFile = null;
+// Custom in-memory filesystem
+let virtualFS = {};
 
-/**
- * Custom require function to load from virtualFS
- */
-function createVirtualRequire(baseDir) {
+// Helper: Load all files from ZIP into memory
+async function loadZipToMemory(buffer) {
+  const zip = new AdmZip(buffer);
+  const entries = zip.getEntries();
+
+  entries.forEach((entry) => {
+    if (!entry.isDirectory) {
+      const filePath = entry.entryName.replace(/\\/g, "/"); // normalize
+      virtualFS[filePath] = entry.getData().toString("utf-8");
+    }
+  });
+}
+
+// Custom require (override for virtual FS)
+function createVirtualRequire(baseDir = "") {
   function virtualRequire(modulePath) {
     let resolvedPath;
 
-    if (modulePath.startsWith('.')) {
+    if (modulePath.startsWith(".")) {
+      // relative path ./ or ../
       resolvedPath = path.join(baseDir, modulePath);
-      if (!resolvedPath.endsWith('.js')) resolvedPath += '.js';
+      if (!resolvedPath.endsWith(".js")) resolvedPath += ".js";
+    } else if (modulePath.startsWith("/")) {
+      // handle absolute require like "/lib/data"
+      resolvedPath = "EDITH-MD" + modulePath;
+      if (!resolvedPath.endsWith(".js")) resolvedPath += ".js";
     } else {
-      return require(modulePath); // Node modules normally
+      // external dependency -> normal require
+      return require(modulePath);
     }
 
+    // normalize path
+    resolvedPath = resolvedPath.replace(/\\/g, "/");
+
+    // file not in memory
     if (!virtualFS[resolvedPath]) {
-      throw new Error(`Module not found in RAM: ${modulePath}`);
+      throw new Error(`Module not found in RAM: ${resolvedPath}`);
     }
 
-    const moduleContent = virtualFS[resolvedPath];
-    const moduleExports = {};
-    const module = { exports: moduleExports };
+    // new module
+    const code = virtualFS[resolvedPath];
+    const mod = { exports: {} };
 
-    const wrapper = new Function(
-      'require', 'module', 'exports', '__dirname', '__filename',
-      moduleContent
+    // run the code with custom require
+    const wrapped = Module.wrap(code);
+    const script = new Function(
+      "exports",
+      "require",
+      "module",
+      "__filename",
+      "__dirname",
+      wrapped
     );
 
-    wrapper(
-      createVirtualRequire(path.dirname(resolvedPath)),
-      module,
-      moduleExports,
-      path.dirname(resolvedPath),
-      resolvedPath
+    const dirname = path.dirname(resolvedPath);
+    script(
+      mod.exports,
+      createVirtualRequire(dirname), // nested requires handle
+      mod,
+      resolvedPath,
+      dirname
     );
 
-    return module.exports;
+    return mod.exports;
   }
+
   return virtualRequire;
 }
 
-/**
- * Fetch MEGA link from GitHub JSON
- */
-async function getMegaLink() {
-  const response = await fetch(githubJsonUrl);
-  const data = await response.json();
-  return data.megaUrl;
-}
-
-/**
- * Load ZIP into memory (no extraction to disk)
- */
-async function loadZipToMemory(zipBuffer) {
-  const zip = new AdmZip(zipBuffer);
-  const entries = zip.getEntries();
-
-  for (const entry of entries) {
-    if (entry.isDirectory) continue;
-
-    const fullPath = path.join('/', entry.entryName);
-    virtualFS[fullPath] = entry.getData().toString('utf-8');
-
-    if (entry.entryName.toLowerCase().endsWith('index.js')) {
-      entryFile = fullPath;
-    }
-  }
-}
-
-/**
- * Main execution
- */
+// Download MEGA → Run bot
 (async () => {
-  try {
-    const megaUrl = await getMegaLink();
+  console.log("🔄 Downloading EDITH-MD from MEGA (RAM only)...");
 
-    console.log("🔄 Downloading EDITH-MD from MEGA (RAM only)...");
+  const megaUrl = await getMegaLink();
+  const file = File.fromURL(megaUrl);
+  await file.loadAttributes();
+  const buffer = await file.downloadBuffer();
 
-    // Download buffer from MEGA
-    const file = File.fromURL(megaUrl);
-    await file.loadAttributes();
-    const buffer = await file.downloadBuffer();
+  // Load all files into memory
+  await loadZipToMemory(buffer);
+  console.log("📦 EDITH-MD loaded in RAM (no storage used)");
 
-    // Load all files into memory
-    await loadZipToMemory(buffer);
-    console.log("📦 EDITH-MD loaded in RAM (no storage used)");
-
-    // Start from entry file
-    if (!virtualFS[entryFile]) {
-      throw new Error(`Entry file ${entryFile} not found in ZIP!`);
-    }
-
-    console.log("🚀 Starting EDITH-MD Bot...");
-    const virtualRequire = createVirtualRequire(path.dirname(entryFile));
-    virtualRequire("./" + path.basename(entryFile));
-
-  } catch (err) {
-    console.error("❌ Error:", err);
-    process.exit(1);
+  // Start from entry file
+  if (!virtualFS[entryFile]) {
+    throw new Error(`Entry file ${entryFile} not found in ZIP!`);
   }
+
+  console.log("🚀 Starting EDITH-MD Bot...");
+  const virtualRequire = createVirtualRequire(path.dirname(entryFile));
+  virtualRequire("./" + path.basename(entryFile));
 })();
